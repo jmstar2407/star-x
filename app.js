@@ -324,39 +324,37 @@ function fetchPendingThumbnails(posts) {
   });
 }
 
-// Instagram oEmbed via JSONP — bypasses CORS restriction
-// Instagram's oEmbed endpoint supports ?callback= for JSONP
+// Instagram oEmbed — CORS workaround using public proxy
+// Instagram blocks direct browser requests, so we route through
+// a CORS proxy. We try multiple proxies in order.
 function fetchOembed(url) {
-  return new Promise((resolve, reject) => {
-    const clean = cleanIgUrl(url);
-    const cbName = '__igoembed_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error('oEmbed timeout'));
-    }, 8000);
+  const clean = cleanIgUrl(url);
+  const oembedUrl = `https://api.instagram.com/oembed/?url=${encodeURIComponent(clean)}&maxwidth=320&omitscript=true`;
 
-    function cleanup() {
-      delete window[cbName];
-      const s = document.getElementById(cbName);
-      if (s) s.remove();
-    }
+  // Try proxies in sequence
+  const proxies = [
+    `https://corsproxy.io/?${encodeURIComponent(oembedUrl)}`,
+    `https://api.allorigins.win/get?url=${encodeURIComponent(oembedUrl)}`,
+  ];
 
-    window[cbName] = function(data) {
-      clearTimeout(timeout);
-      cleanup();
-      if (data && (data.thumbnail_url || data.html)) {
-        resolve(data);
-      } else {
-        reject(new Error('No usable oEmbed data'));
-      }
-    };
+  return tryProxies(proxies, 0);
+}
 
-    const script = document.createElement('script');
-    script.id = cbName;
-    script.src = `https://api.instagram.com/oembed/?url=${encodeURIComponent(clean)}&maxwidth=320&omitscript=true&callback=${cbName}`;
-    script.onerror = () => { clearTimeout(timeout); cleanup(); reject(new Error('Script load failed')); };
-    document.head.appendChild(script);
-  });
+async function tryProxies(proxies, index) {
+  if (index >= proxies.length) throw new Error('All proxies failed');
+  try {
+    const res = await fetch(proxies[index], { signal: AbortSignal.timeout(7000) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const raw = await res.json();
+
+    // allorigins wraps in { contents: "..." }
+    const data = raw.contents ? JSON.parse(raw.contents) : raw;
+
+    if (!data || (!data.thumbnail_url && !data.html)) throw new Error('No data');
+    return data;
+  } catch (e) {
+    return tryProxies(proxies, index + 1);
+  }
 }
 
 // Update a single card's thumbnail after oEmbed fetch
