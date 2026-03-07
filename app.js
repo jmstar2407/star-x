@@ -324,37 +324,29 @@ function fetchPendingThumbnails(posts) {
   });
 }
 
-// Instagram oEmbed — CORS workaround using public proxy
-// Instagram blocks direct browser requests, so we route through
-// a CORS proxy. We try multiple proxies in order.
-function fetchOembed(url) {
+// ── OEMBED / THUMBNAIL ─────────────────────
+// IMPORTANTE: Despliega cloudflare-worker.js en Cloudflare Workers
+// y pega aquí la URL que te da. Instrucciones en el README.
+// Ejemplo: 'https://invault-proxy.TU_USUARIO.workers.dev'
+const WORKER_URL = 'https://star-x.jmstar2407.workers.dev';
+
+async function fetchOembed(url) {
   const clean = cleanIgUrl(url);
-  const oembedUrl = `https://api.instagram.com/oembed/?url=${encodeURIComponent(clean)}&maxwidth=320&omitscript=true`;
 
-  // Try proxies in sequence
-  const proxies = [
-    `https://corsproxy.io/?${encodeURIComponent(oembedUrl)}`,
-    `https://api.allorigins.win/get?url=${encodeURIComponent(oembedUrl)}`,
-  ];
-
-  return tryProxies(proxies, 0);
-}
-
-async function tryProxies(proxies, index) {
-  if (index >= proxies.length) throw new Error('All proxies failed');
-  try {
-    const res = await fetch(proxies[index], { signal: AbortSignal.timeout(7000) });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const raw = await res.json();
-
-    // allorigins wraps in { contents: "..." }
-    const data = raw.contents ? JSON.parse(raw.contents) : raw;
-
-    if (!data || (!data.thumbnail_url && !data.html)) throw new Error('No data');
-    return data;
-  } catch (e) {
-    return tryProxies(proxies, index + 1);
+  // Check if worker is configured
+  if (!WORKER_URL || WORKER_URL === 'https://star-x.jmstar2407.workers.dev') {
+    throw new Error('Worker not configured');
   }
+
+  const proxyUrl = `${WORKER_URL}?url=${encodeURIComponent(clean)}`;
+  const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+
+  if (!res.ok) throw new Error('Worker HTTP ' + res.status);
+  const data = await res.json();
+
+  if (data.error) throw new Error(data.error);
+  if (!data.thumbnail_url && !data.html) throw new Error('No usable data');
+  return data;
 }
 
 // Update a single card's thumbnail after oEmbed fetch
@@ -856,10 +848,8 @@ document.addEventListener('DOMContentLoaded', () => {
   setupPin();
   setupEvents();
 
-  // If Firebase takes too long, show error hint
-  setTimeout(() => {
-    if (!state.fbReady && appScreen.classList.contains('active')) {
-      showToast('⚠️ Configura Firebase en index.html', 5000);
-    }
-  }, 5000);
+  // Warn if worker not configured
+  if (!WORKER_URL || WORKER_URL === 'PEGA_AQUI_TU_WORKER_URL') {
+    console.warn('[InVault] Cloudflare Worker no configurado. Las miniaturas no se cargarán. Ver cloudflare-worker.js para instrucciones.');
+  }
 });
