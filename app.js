@@ -324,22 +324,39 @@ function fetchPendingThumbnails(posts) {
   });
 }
 
-// Instagram oEmbed endpoint (public, no token needed for basic info)
-// Returns thumbnail_url, title, html embed code
-async function fetchOembed(url) {
-  const clean = cleanIgUrl(url);
-  // Instagram's public oEmbed endpoint
-  const endpoint = `https://graph.facebook.com/v18.0/instagram_oembed?url=${encodeURIComponent(clean)}&maxwidth=320&fields=thumbnail_url,title,html&access_token=&omitscript=true`;
+// Instagram oEmbed via JSONP — bypasses CORS restriction
+// Instagram's oEmbed endpoint supports ?callback= for JSONP
+function fetchOembed(url) {
+  return new Promise((resolve, reject) => {
+    const clean = cleanIgUrl(url);
+    const cbName = '__igoembed_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('oEmbed timeout'));
+    }, 8000);
 
-  // Try without access token first (works for many public posts)
-  // Instagram also supports: https://api.instagram.com/oembed/?url=...
-  const igOembed = `https://api.instagram.com/oembed/?url=${encodeURIComponent(clean)}&maxwidth=320&omitscript=true`;
+    function cleanup() {
+      delete window[cbName];
+      const s = document.getElementById(cbName);
+      if (s) s.remove();
+    }
 
-  const res = await fetch(igOembed);
-  if (!res.ok) throw new Error('oEmbed failed: ' + res.status);
-  const data = await res.json();
-  if (!data.thumbnail_url && !data.html) throw new Error('No usable data');
-  return data;
+    window[cbName] = function(data) {
+      clearTimeout(timeout);
+      cleanup();
+      if (data && (data.thumbnail_url || data.html)) {
+        resolve(data);
+      } else {
+        reject(new Error('No usable oEmbed data'));
+      }
+    };
+
+    const script = document.createElement('script');
+    script.id = cbName;
+    script.src = `https://api.instagram.com/oembed/?url=${encodeURIComponent(clean)}&maxwidth=320&omitscript=true&callback=${cbName}`;
+    script.onerror = () => { clearTimeout(timeout); cleanup(); reject(new Error('Script load failed')); };
+    document.head.appendChild(script);
+  });
 }
 
 // Update a single card's thumbnail after oEmbed fetch
