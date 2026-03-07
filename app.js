@@ -332,12 +332,6 @@ const WORKER_URL = 'https://star-x.jmstar2407.workers.dev';
 
 async function fetchOembed(url) {
   const clean = cleanIgUrl(url);
-
-  // Check if worker is configured
-  if (!WORKER_URL || WORKER_URL === 'https://star-x.jmstar2407.workers.dev') {
-    throw new Error('Worker not configured');
-  }
-
   const proxyUrl = `${WORKER_URL}?url=${encodeURIComponent(clean)}`;
   const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
 
@@ -847,9 +841,4 @@ function showToast(msg, duration = 2500) {
 document.addEventListener('DOMContentLoaded', () => {
   setupPin();
   setupEvents();
-
-  // Warn if worker not configured
-  if (!WORKER_URL || WORKER_URL === 'PEGA_AQUI_TU_WORKER_URL') {
-    console.warn('[InVault] Cloudflare Worker no configurado. Las miniaturas no se cargarán. Ver cloudflare-worker.js para instrucciones.');
-  }
 });
