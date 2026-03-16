@@ -10,12 +10,13 @@ import { getFirestore, collection, addDoc, getDocs, deleteDoc, doc, orderBy, que
 // 🔧 FIREBASE CONFIG — Reemplaza con tu configuración
 // ============================================================
 const firebaseConfig = {
-  apiKey: "TU_API_KEY_AQUI",
-  authDomain: "TU_PROJECT.firebaseapp.com",
-  projectId: "TU_PROJECT_ID",
-  storageBucket: "TU_PROJECT.appspot.com",
-  messagingSenderId: "TU_SENDER_ID",
-  appId: "TU_APP_ID"
+  apiKey: "AIzaSyD4r7z-ysFQEKMiZaYWShiA_w8k81vJ5Dg",
+  authDomain: "star-x-d2c5a.firebaseapp.com",
+  projectId: "star-x-d2c5a",
+  storageBucket: "star-x-d2c5a.firebasestorage.app",
+  messagingSenderId: "933631576228",
+  appId: "1:933631576228:web:a27ac7bdd89703af7afe31",
+  measurementId: "G-C4TC5LJHVG"
 };
 
 // ============================================================
