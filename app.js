@@ -1,844 +1,918 @@
-// ════════════════════════════════════════════
-// INVAULT v2 — app.js
-// Firebase Firestore + Instagram Embeds (fixed)
-// ════════════════════════════════════════════
-'use strict';
+// ============================================================
+// VoxNote — Transcriptor Inteligente
+// Firebase + Web Speech API + Claude AI
+// ============================================================
 
-// ── EMBED STRATEGY ─────────────────────────
-// Instagram's official embed works via blockquote + embed.js
-// BUT embed.js turns blockquotes into iframes dynamically.
-// The card thumbnails use a scaled-down iframe approach.
-// The detail modal injects a fresh blockquote and calls
-// instgrm.Embeds.process() each time.
-// For posts that can't embed (stories, profiles), we show
-// a styled link card instead.
-//
-// oEmbed thumbnail cache: once fetched, stored in state.thumbCache
-// so we never fetch the same URL twice.
-// ────────────────────────────────────────────
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, collection, addDoc, getDocs, deleteDoc, doc, orderBy, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
-// ── CONSTANTS ──────────────────────────────
-const PIN = '31007';
-const COLLECTION = 'posts';
+// ============================================================
+// 🔧 FIREBASE CONFIG — Reemplaza con tu configuración
+// ============================================================
+const firebaseConfig = {
+  apiKey: "TU_API_KEY_AQUI",
+  authDomain: "TU_PROJECT.firebaseapp.com",
+  projectId: "TU_PROJECT_ID",
+  storageBucket: "TU_PROJECT.appspot.com",
+  messagingSenderId: "TU_SENDER_ID",
+  appId: "TU_APP_ID"
+};
 
-// ── STATE ──────────────────────────────────
+// ============================================================
+// 🤖 CLAUDE API KEY — Reemplaza con tu clave
+// ============================================================
+const CLAUDE_API_KEY = "TU_CLAUDE_API_KEY_AQUI";
+
+// ============================================================
+// FIREBASE INIT
+// ============================================================
+let db;
+try {
+  const app = initializeApp(firebaseConfig);
+  db = getFirestore(app);
+} catch (e) {
+  console.warn("Firebase no configurado — usando localStorage como fallback", e);
+}
+
+// ============================================================
+// STATE
+// ============================================================
 const state = {
-  pin: '',
-  filter: 'all',
-  search: '',
-  posts: [],          // live from Firestore
-  editId: null,
-  editTags: [],
-  db: null,
-  fbReady: false,
-  unsubscribe: null,
-  sidebarOpen: false,
-  thumbCache: {},     // url -> { html, thumbnail_url, title } | 'error'
+  currentView: "home",
+  currentMode: "meeting",
+  isRecording: false,
+  isPaused: false,
+  startTime: null,
+  elapsedMs: 0,
+  timerInterval: null,
+  transcript: [],      // [{ts, speaker, text}]
+  currentSession: null, // session being viewed
+  recognition: null,
+  audioCtx: null,
+  analyser: null,
+  animFrame: null,
+  sessions: []
 };
 
-// ── DOM ────────────────────────────────────
+// ============================================================
+// DOM REFERENCES
+// ============================================================
 const $ = id => document.getElementById(id);
-
-// Screens
-const pinScreen  = $('pin-screen');
-const appScreen  = $('app-screen');
-
-// PIN
-const pinWrap    = document.querySelector('.pin-wrap');
-const pinError   = $('pin-error');
-const pinCells   = [0,1,2,3,4].map(i => $(`pc${i}`));
-
-// App
-const postsGrid  = $('posts-grid');
-const emptyState = $('empty-state');
-const loadState  = $('loading-state');
-const searchInp  = $('search-input');
-
-// Modals
-const addOverlay    = $('add-modal-overlay');
-const detailOverlay = $('detail-modal-overlay');
-
-// Add form
-const addUrl    = $('add-url');
-const addNote   = $('add-note');
-const addTags   = $('add-tags');
-
-// Detail
-const detailNote     = $('detail-note');
-const detailTagsChips= $('detail-tags-chips');
-const detailTagInput = $('detail-tag-input');
-
-// Toast
-const toastEl = $('toast');
-let toastTimer;
-
-// Sidebar
-const sidebar = $('sidebar');
-
-// ── FIREBASE INIT ──────────────────────────
-window.addEventListener('firebase-ready', () => {
-  const { db, collection, query, orderBy, onSnapshot } = window.__firebase;
-  state.db = db;
-  state.fbReady = true;
-
-  // Live listener
-  const q = query(collection(db, COLLECTION), orderBy('savedAt', 'desc'));
-  state.unsubscribe = onSnapshot(q,
-    snapshot => {
-      state.posts = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-      if (appScreen.classList.contains('active')) {
-        hideLoading();
-        renderPosts();
-        updateCounts();
-      }
-    },
-    err => {
-      console.error('Firestore error:', err);
-      hideLoading();
-      showToast('⚠️ Error conectando con Firebase');
-    }
-  );
-});
-
-// ── PIN ────────────────────────────────────
-function setupPin() {
-  document.querySelectorAll('.key[data-n]').forEach(k =>
-    k.addEventListener('click', () => addDigit(k.dataset.n))
-  );
-  $('key-del').addEventListener('click', delDigit);
-
-  document.addEventListener('keydown', e => {
-    if (!pinScreen.classList.contains('active')) return;
-    if (e.key >= '0' && e.key <= '9') addDigit(e.key);
-    if (e.key === 'Backspace') delDigit();
-  });
-}
-
-function addDigit(d) {
-  if (state.pin.length >= 5) return;
-  state.pin += d;
-  renderPinCells();
-  if (state.pin.length === 5) setTimeout(checkPin, 130);
-}
-
-function delDigit() {
-  state.pin = state.pin.slice(0, -1);
-  renderPinCells();
-  pinError.classList.remove('show');
-}
-
-function renderPinCells() {
-  pinCells.forEach((c, i) => c.classList.toggle('on', i < state.pin.length));
-}
-
-function checkPin() {
-  if (state.pin === PIN) {
-    enterApp();
-  } else {
-    pinError.classList.add('show');
-    pinWrap.classList.add('shaking');
-    pinCells.forEach(c => { c.style.background = '#ff4d6d'; c.style.borderColor = 'transparent'; });
-    setTimeout(() => {
-      state.pin = '';
-      renderPinCells();
-      pinError.classList.remove('show');
-      pinWrap.classList.remove('shaking');
-      pinCells.forEach(c => { c.style.background = ''; c.style.borderColor = ''; });
-    }, 700);
-  }
-}
-
-function enterApp() {
-  pinScreen.classList.remove('active');
-  appScreen.classList.add('active');
-  state.pin = '';
-  renderPinCells();
-  renderPosts();
-  updateCounts();
-  // Check URL params for shared content (Capacitor / PWA share target)
-  checkSharedContent();
-}
-
-function lockApp() {
-  appScreen.classList.remove('active');
-  pinScreen.classList.add('active');
-  closeAllModals();
-  if (state.unsubscribe) state.unsubscribe();
-  state.unsubscribe = null;
-}
-
-// ── FIRESTORE CRUD ─────────────────────────
-async function addPost(url, type, note, tags) {
-  if (!state.fbReady) { showToast('⚠️ Firebase no está listo'); return; }
-  const { db, collection, addDoc } = window.__firebase;
-  try {
-    await addDoc(collection(db, COLLECTION), {
-      url,
-      type,
-      note,
-      tags,
-      savedAt: new Date().toISOString(),
-    });
-    showToast('✅ Post guardado');
-    return true;
-  } catch (e) {
-    console.error(e);
-    showToast('❌ Error guardando en Firebase');
-    return false;
-  }
-}
-
-async function updatePost(id, data) {
-  if (!state.fbReady) return;
-  const { db, doc, updateDoc } = window.__firebase;
-  try {
-    await updateDoc(doc(db, COLLECTION, id), data);
-    showToast('✅ Cambios guardados');
-  } catch (e) {
-    console.error(e);
-    showToast('❌ Error actualizando');
-  }
-}
-
-async function deletePost(id) {
-  if (!state.fbReady) return;
-  const { db, doc, deleteDoc } = window.__firebase;
-  try {
-    await deleteDoc(doc(db, COLLECTION, id));
-    closeAllModals();
-    showToast('🗑️ Post eliminado');
-  } catch (e) {
-    console.error(e);
-    showToast('❌ Error eliminando');
-  }
-}
-
-// ── RENDER ─────────────────────────────────
-function hideLoading() {
-  loadState.style.display = 'none';
-}
-
-function getFiltered() {
-  return state.posts.filter(p => {
-    if (state.filter !== 'all' && p.type !== state.filter) return false;
-    if (state.search) {
-      const q = state.search.toLowerCase();
-      const inUrl  = p.url?.toLowerCase().includes(q);
-      const inNote = p.note?.toLowerCase().includes(q);
-      const inTags = p.tags?.some(t => t.toLowerCase().includes(q));
-      if (!inUrl && !inNote && !inTags) return false;
-    }
-    return true;
-  });
-}
-
-function renderPosts() {
-  hideLoading();
-  const posts = getFiltered();
-
-  if (state.posts.length === 0) {
-    emptyState.classList.remove('hidden');
-    postsGrid.innerHTML = '';
-    return;
-  }
-
-  emptyState.classList.add('hidden');
-
-  if (posts.length === 0) {
-    postsGrid.innerHTML = `
-      <div style="text-align:center;padding:60px 20px;color:var(--text-3)">
-        <p style="font-size:14px">Sin resultados para "<em>${esc(state.search)}</em>"</p>
-      </div>`;
-    return;
-  }
-
-  postsGrid.innerHTML = posts.map((p, i) => {
-    const typeLabel = { post:'Post', reel:'Reel', story:'Story', profile:'Perfil' }[p.type] || 'Post';
-    const tagsHtml  = (p.tags || []).slice(0,3).map(t => `<span class="card-tag">${esc(t)}</span>`).join('');
-    const date      = relTime(p.savedAt);
-    const canEmbed  = isEmbeddableUrl(p.url);
-
-    // Thumbnail: use cached data if available
-    const cached = state.thumbCache[p.url];
-    let previewHtml;
-
-    if (cached && cached !== 'error' && cached.thumbnail_url) {
-      // We have a thumbnail image from oEmbed
-      previewHtml = `
-        <div class="card-thumb-img" style="background-image:url('${cached.thumbnail_url}')">
-          <div class="card-thumb-overlay">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="white" opacity="0.9"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-          </div>
-        </div>`;
-    } else if (cached === 'error' || !canEmbed) {
-      // No embed possible — show styled placeholder
-      previewHtml = cardPlaceholder(p.type);
-    } else {
-      // Not yet fetched — show skeleton and trigger fetch
-      previewHtml = `<div class="card-thumb-skeleton" data-url="${esc(p.url)}"></div>`;
-    }
-
-    return `
-    <div class="post-card" data-id="${p.id}" style="animation-delay:${Math.min(i * 0.05, 0.5)}s">
-      <div class="card-ig-preview">${previewHtml}</div>
-      <div class="card-body">
-        <div class="card-top-row">
-          <span class="card-type t-${p.type}">${typeLabel}</span>
-          <span class="card-date">${date}</span>
-        </div>
-        <div class="card-url">${esc(shortUrl(p.url))}</div>
-        ${p.note ? `<div class="card-note">${esc(p.note)}</div>` : ''}
-        ${tagsHtml ? `<div class="card-tags">${tagsHtml}</div>` : ''}
-      </div>
-    </div>`;
-  }).join('');
-
-  postsGrid.querySelectorAll('.post-card').forEach(c =>
-    c.addEventListener('click', () => openDetail(c.dataset.id))
-  );
-
-  // Fetch thumbnails for uncached embeddable posts
-  fetchPendingThumbnails(posts);
-}
-
-// Fetch oEmbed thumbnails for all posts that need it
-function fetchPendingThumbnails(posts) {
-  const pending = posts.filter(p =>
-    isEmbeddableUrl(p.url) && !state.thumbCache[p.url]
-  );
-  if (!pending.length) return;
-
-  pending.forEach(p => {
-    // Mark as in-progress to avoid duplicate fetches
-    state.thumbCache[p.url] = 'loading';
-    fetchOembed(p.url)
-      .then(data => {
-        state.thumbCache[p.url] = data; // { thumbnail_url, title, html, ... }
-        // Update just the skeleton for this card
-        updateCardThumb(p.id, p.url, data);
-      })
-      .catch(() => {
-        state.thumbCache[p.url] = 'error';
-        updateCardThumb(p.id, p.url, null);
-      });
-  });
-}
-
-// ── OEMBED / THUMBNAIL ─────────────────────
-// IMPORTANTE: Despliega cloudflare-worker.js en Cloudflare Workers
-// y pega aquí la URL que te da. Instrucciones en el README.
-// Ejemplo: 'https://invault-proxy.TU_USUARIO.workers.dev'
-const WORKER_URL = 'https://star-x.jmstar2407.workers.dev';
-
-async function fetchOembed(url) {
-  const clean = cleanIgUrl(url);
-  const proxyUrl = `${WORKER_URL}?url=${encodeURIComponent(clean)}`;
-  const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-
-  if (!res.ok) throw new Error('Worker HTTP ' + res.status);
-  const data = await res.json();
-
-  if (data.error) throw new Error(data.error);
-  if (!data.thumbnail_url && !data.html) throw new Error('No usable data');
-  return data;
-}
-
-// Update a single card's thumbnail after oEmbed fetch
-function updateCardThumb(postId, url, data) {
-  const card = postsGrid.querySelector(`.post-card[data-id="${postId}"]`);
-  if (!card) return;
-
-  const preview = card.querySelector('.card-ig-preview');
-  if (!preview) return;
-
-  if (data && data.thumbnail_url) {
-    preview.innerHTML = `
-      <div class="card-thumb-img" style="background-image:url('${data.thumbnail_url}')">
-        <div class="card-thumb-overlay">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="white" opacity="0.9"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-        </div>
-      </div>`;
-  } else {
-    // Get type from the card badge
-    const typeBadge = card.querySelector('.card-type');
-    const type = typeBadge?.className.replace(/.*t-(\w+).*/, '$1') || 'post';
-    preview.innerHTML = cardPlaceholder(type);
-  }
-}
-
-function cardPlaceholder(type) {
-  const icons = {
-    post:    `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="12" cy="12" r="4"/><circle cx="18.5" cy="5.5" r="1"/></svg>`,
-    reel:    `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
-    story:   `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg>`,
-    profile: `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
-  };
-  const labels = { post:'Post', reel:'Reel', story:'Story', profile:'Perfil' };
-  return `
-    <div class="card-ig-icon">
-      ${icons[type] || icons.post}
-      <span>${labels[type] || 'Post'}</span>
-    </div>`;
-}
-
-function updateCounts() {
-  const counts = { all: 0, post: 0, reel: 0, story: 0 };
-  state.posts.forEach(p => {
-    counts.all++;
-    if (counts[p.type] !== undefined) counts[p.type]++;
-  });
-  Object.keys(counts).forEach(k => {
-    const el = $(`count-${k}`);
-    if (el) el.textContent = counts[k];
-  });
-}
-
-// ── HELPERS ────────────────────────────────
-function isEmbeddableUrl(url) {
-  return /instagram\.com\/(p|reel|reels|tv)\/[^/?#]+/i.test(url);
-}
-
-function cleanIgUrl(url) {
-  try {
-    const u = new URL(url);
-    // Keep only the path up to the post ID
-    const match = u.pathname.match(/^\/(p|reel|reels|tv)\/([^/]+)/i);
-    if (match) return `https://www.instagram.com/${match[1]}/${match[2]}/`;
-  } catch {}
-  return url.split('?')[0].replace(/\/$/, '') + '/';
-}
-
-// ── EMBED BUILDER (detail modal) ───────────
-function buildEmbed(url) {
-  const container = $('embed-container');
-  if (!container) return;
-
-  const canEmbed = isEmbeddableUrl(url);
-
-  if (!canEmbed) {
-    container.innerHTML = `
-      <div class="embed-fallback">
-        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" style="color:var(--text-3)">
-          <rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="18.5" cy="5.5" r="1"/>
-        </svg>
-        <p>Vista previa no disponible<br><small style="color:var(--text-3)">Stories y perfiles no soportan embed</small></p>
-        <a href="${url}" target="_blank" rel="noopener" class="embed-open-link">Abrir en Instagram →</a>
-      </div>`;
-    return;
-  }
-
-  const clean = cleanIgUrl(url);
-
-  // Check if we have cached thumbnail to show first while iframe loads
-  const cached = state.thumbCache[url];
-  const thumbBg = (cached && cached !== 'error' && cached !== 'loading' && cached.thumbnail_url)
-    ? `style="background:url('${cached.thumbnail_url}') center/cover no-repeat"`
-    : '';
-
-  // Use the official Instagram embed iframe URL
-  // This is the same URL that embed.js injects, but we do it directly
-  // to avoid race conditions with the embed script re-processing
-  const embedUrl = `https://www.instagram.com/${isReelUrl(clean) ? 'reel' : 'p'}/${extractPostId(clean)}/embed/captioned/?cr=1&v=14&wp=540`;
-
-  container.innerHTML = `
-    <div class="embed-iframe-wrap" ${thumbBg}>
-      <iframe
-        src="${embedUrl}"
-        class="ig-embed-iframe"
-        frameborder="0"
-        scrolling="no"
-        allowtransparency="true"
-        allow="encrypted-media"
-        loading="lazy"
-        onload="this.parentElement.classList.add('loaded')"
-        onerror="this.parentElement.innerHTML = '<div class=\\'embed-fallback\\'><p>No se pudo cargar</p><a href=\\'${url}\\' target=\\'_blank\\' class=\\'embed-open-link\\'>Abrir en Instagram →</a></div>'"
-      ></iframe>
-      <div class="iframe-loading-overlay">
-        <div class="spinner sm"></div>
-        <span>Cargando vista previa…</span>
-      </div>
-    </div>`;
-}
-
-function isReelUrl(url) {
-  return /\/(reel|reels|tv)\//i.test(url);
-}
-
-function extractPostId(url) {
-  const m = url.match(/\/(p|reel|reels|tv)\/([A-Za-z0-9_-]+)/i);
-  return m ? m[2] : '';
-}
-
-// ── DETAIL MODAL ───────────────────────────
-function openDetail(id) {
-  const post = state.posts.find(p => p.id === id);
-  if (!post) return;
-
-  state.editId = id;
-  state.editTags = [...(post.tags || [])];
-
-  // Header badge
-  const labels = { post:'Post', reel:'Reel', story:'Story', profile:'Perfil' };
-  $('detail-badge').textContent = labels[post.type] || 'Post';
-
-  // Meta
-  const urlEl = $('detail-url');
-  urlEl.textContent = shortUrl(post.url, 60);
-  urlEl.href = post.url;
-
-  $('detail-date').textContent = new Date(post.savedAt).toLocaleString('es-ES');
-
-  // Note
-  detailNote.value = post.note || '';
-
-  // Tags
-  renderDetailTags();
-
-  // Show modal first, then build embed
-  detailOverlay.classList.remove('hidden');
-
-  // Reset embed container with loading state
-  const ec = $('embed-container');
-  ec.innerHTML = `
-    <div class="embed-fallback">
-      <div class="spinner sm"></div>
-      <span style="font-size:13px;color:var(--text-3);margin-top:4px">Cargando vista previa…</span>
-    </div>`;
-
-  // Build embed after modal animation completes
-  setTimeout(() => buildEmbed(post.url), 250);
-}
-
-function renderDetailTags() {
-  detailTagsChips.innerHTML = state.editTags.map(t => `
-    <div class="tag-chip">
-      <span>${esc(t)}</span>
-      <button data-tag="${esc(t)}" onclick="removeDetailTag(this.dataset.tag)">×</button>
-    </div>`).join('');
-}
-
-window.removeDetailTag = tag => {
-  state.editTags = state.editTags.filter(t => t !== tag);
-  renderDetailTags();
+const el = {
+  splash: $("splash"),
+  app: $("app"),
+  navTitle: $("navTitle"),
+  btnBack: $("btnBack"),
+  btnHistory: $("btnHistory"),
+  // Views
+  viewHome: $("viewHome"),
+  viewRecording: $("viewRecording"),
+  viewSession: $("viewSession"),
+  viewHistory: $("viewHistory"),
+  // Home
+  cardMeeting: $("cardMeeting"),
+  cardClass: $("cardClass"),
+  statSessions: $("statSessions"),
+  statMinutes: $("statMinutes"),
+  statWords: $("statWords"),
+  // Recording
+  recModeBadge: $("recModeBadge"),
+  sessionTitleInput: $("sessionTitleInput"),
+  audioCanvas: $("audioCanvas"),
+  recTime: $("recTime"),
+  recStatus: $("recStatus"),
+  recDot: document.querySelector(".rec-dot"),
+  liveTranscript: $("liveTranscript"),
+  btnRecord: $("btnRecord"),
+  btnPause: $("btnPause"),
+  btnStop: $("btnStop"),
+  recHint: $("recHint"),
+  // Session
+  sdTitle: $("sdTitle"),
+  sdDate: $("sdDate"),
+  sdDuration: $("sdDuration"),
+  sdWords: $("sdWords"),
+  tabs: document.querySelectorAll(".tab"),
+  tabTranscript: $("tabTranscript"),
+  tabSummary: $("tabSummary"),
+  transcriptFull: $("transcriptFull"),
+  summaryLoading: $("summaryLoading"),
+  summaryResult: $("summaryResult"),
+  btnCopy: $("btnCopy"),
+  btnExportTxt: $("btnExportTxt"),
+  btnExportPDF: $("btnExportPDF"),
+  btnShare: $("btnShare"),
+  btnDeleteSession: $("btnDeleteSession"),
+  // History
+  searchInput: $("searchInput"),
+  sessionList: $("sessionList"),
+  emptyHistory: $("emptyHistory"),
+  histCount: $("histCount"),
+  // Misc
+  toast: $("toast"),
+  modalOverlay: $("modalOverlay"),
+  modalTitle: $("modalTitle"),
+  modalMsg: $("modalMsg"),
+  modalCancel: $("modalCancel"),
+  modalConfirm: $("modalConfirm"),
 };
 
-// ── ADD MODAL ──────────────────────────────
-function openAddModal(prefillUrl = '') {
-  addUrl.value  = prefillUrl;
-  addNote.value = '';
-  addTags.value = '';
-  document.querySelector('input[name="post-type"][value="post"]').checked = true;
-
-  if (prefillUrl) {
-    const det = detectType(prefillUrl);
-    const radio = document.querySelector(`input[name="post-type"][value="${det}"]`);
-    if (radio) radio.checked = true;
-    showUrlPreview(prefillUrl);
-  } else {
-    $('url-preview').classList.add('hidden');
-  }
-
-  addOverlay.classList.remove('hidden');
-  setTimeout(() => addUrl.focus(), 300);
-}
-
-function showUrlPreview(url) {
-  const pre = $('url-preview');
-  if (url && url.includes('instagram.com')) {
-    pre.textContent = url;
-    pre.classList.remove('hidden');
-  } else {
-    pre.classList.add('hidden');
-  }
-}
-
-function closeAllModals() {
-  addOverlay.classList.add('hidden');
-  detailOverlay.classList.add('hidden');
-  state.editId = null;
-}
-
-// ── EVENT SETUP ────────────────────────────
-function setupEvents() {
-  // PIN lock
-  $('sidebar-lock').addEventListener('click', lockApp);
-
-  // Sidebar nav filters
-  document.querySelectorAll('.nav-item[data-filter]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.filter = btn.dataset.filter;
-      document.querySelectorAll('.nav-item[data-filter]').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.pill[data-filter]').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.querySelector(`.pill[data-filter="${state.filter}"]`)?.classList.add('active');
-      renderPosts();
-      if (window.innerWidth <= 768) closeSidebar();
-    });
-  });
-
-  // Filter pills (mobile)
-  document.querySelectorAll('.pill[data-filter]').forEach(pill => {
-    pill.addEventListener('click', () => {
-      state.filter = pill.dataset.filter;
-      document.querySelectorAll('.pill[data-filter]').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.nav-item[data-filter]').forEach(b => b.classList.remove('active'));
-      pill.classList.add('active');
-      document.querySelector(`.nav-item[data-filter="${state.filter}"]`)?.classList.add('active');
-      renderPosts();
-    });
-  });
-
-  // Search
-  searchInp.addEventListener('input', () => {
-    state.search = searchInp.value.trim();
-    renderPosts();
-  });
-
-  // Topbar add
-  $('topbar-add-btn').addEventListener('click', () => openAddModal());
-  $('empty-add-btn').addEventListener('click', () => openAddModal());
-  $('fab').addEventListener('click', () => openAddModal());
-
-  // Menu btn (mobile sidebar)
-  $('menu-btn').addEventListener('click', toggleSidebar);
-
-  // Close sidebar when clicking outside
-  document.addEventListener('click', e => {
-    if (state.sidebarOpen && !sidebar.contains(e.target) && e.target !== $('menu-btn')) {
-      closeSidebar();
-    }
-  });
-
-  // ── ADD MODAL ──
-  $('add-modal-close').addEventListener('click', closeAllModals);
-  $('add-cancel').addEventListener('click', closeAllModals);
-
-  addOverlay.addEventListener('click', e => {
-    if (e.target === addOverlay) closeAllModals();
-  });
-
-  // Paste btn
-  $('paste-btn').addEventListener('click', async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      addUrl.value = text;
-      showUrlPreview(text);
-      const det = detectType(text);
-      const radio = document.querySelector(`input[name="post-type"][value="${det}"]`);
-      if (radio) radio.checked = true;
-    } catch {
-      showToast('⚠️ No se pudo pegar del portapapeles');
-    }
-  });
-
-  // Auto-detect type on URL input
-  addUrl.addEventListener('input', () => {
-    const url = addUrl.value.trim();
-    showUrlPreview(url);
-    if (url.includes('instagram.com')) {
-      const det = detectType(url);
-      const radio = document.querySelector(`input[name="post-type"][value="${det}"]`);
-      if (radio) radio.checked = true;
-    }
-  });
-
-  // Save new post
-  $('add-save').addEventListener('click', async () => {
-    const url = addUrl.value.trim();
-    if (!url) { showToast('⚠️ Introduce un enlace'); return; }
-    if (!url.startsWith('http')) { showToast('⚠️ URL inválida'); return; }
-
-    const type = document.querySelector('input[name="post-type"]:checked')?.value || 'post';
-    const note = addNote.value.trim();
-    const tags = addTags.value.split(',').map(t => t.trim()).filter(Boolean);
-
-    const btn = $('add-save');
-    btn.textContent = 'Guardando…';
-    btn.disabled = true;
-
-    const ok = await addPost(url, type, note, tags);
-
-    btn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/></svg> Guardar`;
-    btn.disabled = false;
-
-    if (ok) closeAllModals();
-  });
-
-  // ── DETAIL MODAL ──
-  $('detail-close').addEventListener('click', closeAllModals);
-  $('detail-cancel').addEventListener('click', closeAllModals);
-
-  detailOverlay.addEventListener('click', e => {
-    if (e.target === detailOverlay) closeAllModals();
-  });
-
-  $('detail-copy-btn').addEventListener('click', () => {
-    const post = state.posts.find(p => p.id === state.editId);
-    if (!post) return;
-    copyText(post.url);
-    showToast('📋 Enlace copiado');
-  });
-
-  $('detail-open-btn').addEventListener('click', () => {
-    const post = state.posts.find(p => p.id === state.editId);
-    if (!post) return;
-    window.open(post.url, '_blank', 'noopener');
-  });
-
-  $('detail-delete-btn').addEventListener('click', () => {
-    if (!state.editId) return;
-    if (confirm('¿Eliminar este post de tu colección?')) {
-      deletePost(state.editId);
-    }
-  });
-
-  $('detail-save').addEventListener('click', async () => {
-    if (!state.editId) return;
-    await updatePost(state.editId, {
-      note: detailNote.value.trim(),
-      tags: state.editTags,
-    });
-    closeAllModals();
-  });
-
-  // Tag add in detail
-  $('detail-tag-add').addEventListener('click', addDetailTag);
-  detailTagInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') addDetailTag();
-  });
-}
-
-function addDetailTag() {
-  const val = detailTagInput.value.trim();
-  if (val && !state.editTags.includes(val)) {
-    state.editTags.push(val);
-    renderDetailTags();
-  }
-  detailTagInput.value = '';
-}
-
-// ── SIDEBAR ────────────────────────────────
-function toggleSidebar() {
-  state.sidebarOpen ? closeSidebar() : openSidebar();
-}
-
-function openSidebar() {
-  sidebar.classList.add('open');
-  state.sidebarOpen = true;
-}
-
-function closeSidebar() {
-  sidebar.classList.remove('open');
-  state.sidebarOpen = false;
-}
-
-// ── SHARED CONTENT ─────────────────────────
-function checkSharedContent() {
-  // URL params from Web Share Target / Capacitor
-  const params = new URLSearchParams(window.location.search);
-  const shared = params.get('url') || params.get('text') || params.get('shared');
-
-  if (shared && shared.includes('instagram.com')) {
-    // Clean URL from history
-    history.replaceState({}, '', window.location.pathname);
-    openAddModal(shared.trim());
-    return;
-  }
-
-  // Session storage (set by ShareActivity on Android)
-  const pending = sessionStorage.getItem('pending_share');
-  if (pending) {
-    sessionStorage.removeItem('pending_share');
-    try {
-      const { url } = JSON.parse(pending);
-      if (url) openAddModal(url);
-    } catch {}
-  }
-}
-
-// Capacitor deep link handler
-window.handleIncomingUrl = url => {
-  try {
-    const parsed = new URL(url);
-    const igUrl = parsed.searchParams.get('url') || parsed.searchParams.get('text');
-    if (igUrl) {
-      if (appScreen.classList.contains('active')) {
-        openAddModal(igUrl);
-      } else {
-        sessionStorage.setItem('pending_share', JSON.stringify({ url: igUrl }));
-      }
-    }
-  } catch {}
-};
-
-// ── UTILS ──────────────────────────────────
-function detectType(url) {
-  if (!url) return 'post';
-  const u = url.toLowerCase();
-  if (u.includes('/reel/') || u.includes('/reels/')) return 'reel';
-  if (u.includes('/stories/')) return 'story';
-  if (u.includes('/tv/')) return 'reel';
-  if (u.includes('/p/')) return 'post';
-  if (/instagram\.com\/[^\/\?#]+\/?$/.test(u)) return 'profile';
-  return 'post';
-}
-
-function shortUrl(url, max = 45) {
-  try {
-    const u = new URL(url);
-    const p = u.hostname + u.pathname;
-    return p.length > max ? p.slice(0, max) + '…' : p;
-  } catch {
-    return url.slice(0, max);
-  }
-}
-
-function relTime(iso) {
-  const d = new Date(iso);
-  const diff = Date.now() - d;
-  const m = Math.floor(diff / 60000);
-  const h = Math.floor(diff / 3600000);
-  const dy = Math.floor(diff / 86400000);
-  if (m < 1) return 'Ahora';
-  if (m < 60) return `${m}m`;
-  if (h < 24) return `${h}h`;
-  if (dy < 7) return `${dy}d`;
-  return d.toLocaleDateString('es-ES', { day:'2-digit', month:'short' });
-}
-
-function esc(str) {
-  if (!str) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function copyText(text) {
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text);
-  } else {
-    const el = document.createElement('textarea');
-    el.value = text;
-    el.style.cssText = 'position:fixed;opacity:0';
-    document.body.appendChild(el);
-    el.select();
-    document.execCommand('copy');
-    el.remove();
-  }
-}
-
+// ============================================================
+// UTILS
+// ============================================================
 function showToast(msg, duration = 2500) {
-  toastEl.textContent = msg;
-  toastEl.classList.remove('hidden');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toastEl.classList.add('hidden'), duration);
+  el.toast.textContent = msg;
+  el.toast.classList.add("show");
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => el.toast.classList.remove("show"), duration);
 }
 
-// ── BOOT ───────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  setupPin();
-  setupEvents();
+function formatTime(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${pad(h)}:${pad(m % 60)}:${pad(s % 60)}`;
+  return `${pad(m)}:${pad(s % 60)}`;
+}
+function pad(n) { return String(n).padStart(2, "0"); }
+
+function formatDate(ts) {
+  if (!ts) return "—";
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  return d.toLocaleDateString("es-ES", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function wordCount(lines) {
+  return lines.reduce((acc, l) => acc + l.text.split(/\s+/).filter(Boolean).length, 0);
+}
+
+function showModal(title, msg) {
+  return new Promise(resolve => {
+    el.modalTitle.textContent = title;
+    el.modalMsg.textContent = msg;
+    el.modalOverlay.classList.remove("hidden");
+    const cleanup = ok => {
+      el.modalOverlay.classList.add("hidden");
+      resolve(ok);
+    };
+    el.modalConfirm.onclick = () => cleanup(true);
+    el.modalCancel.onclick = () => cleanup(false);
+  });
+}
+
+// ============================================================
+// NAVIGATION
+// ============================================================
+function navigateTo(viewId, title, showBack = false) {
+  document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+  $(viewId).classList.add("active");
+  el.navTitle.textContent = title;
+  el.btnBack.classList.toggle("hidden", !showBack);
+  state.currentView = viewId;
+}
+
+el.btnBack.addEventListener("click", () => {
+  if (state.currentView === "viewRecording") {
+    if (state.isRecording) {
+      showModal("¿Salir?", "La grabación se perderá si sales ahora.").then(ok => {
+        if (ok) { stopRecording(false); navigateTo("viewHome", "VoxNote"); }
+      });
+    } else {
+      navigateTo("viewHome", "VoxNote");
+    }
+  } else if (state.currentView === "viewSession") {
+    navigateTo("viewHistory", "Historial", true);
+  } else {
+    navigateTo("viewHome", "VoxNote");
+  }
 });
+
+el.btnHistory.addEventListener("click", () => {
+  renderHistory();
+  navigateTo("viewHistory", "Historial", true);
+});
+
+el.cardMeeting.addEventListener("click", () => {
+  state.currentMode = "meeting";
+  el.recModeBadge.textContent = "Reunión Virtual";
+  el.sessionTitleInput.value = "";
+  navigateTo("viewRecording", "Nueva grabación", true);
+  resetRecordingUI();
+});
+
+el.cardClass.addEventListener("click", () => {
+  state.currentMode = "class";
+  el.recModeBadge.textContent = "Clase Presencial";
+  el.sessionTitleInput.value = "";
+  navigateTo("viewRecording", "Nueva grabación", true);
+  resetRecordingUI();
+});
+
+// ============================================================
+// TABS (Session Detail)
+// ============================================================
+el.tabs.forEach(tab => {
+  tab.addEventListener("click", () => {
+    el.tabs.forEach(t => t.classList.remove("active"));
+    tab.classList.add("active");
+    const target = tab.dataset.tab;
+    el.tabTranscript.classList.toggle("hidden", target !== "transcript");
+    el.tabSummary.classList.toggle("hidden", target !== "summary");
+    if (target === "summary" && state.currentSession) {
+      loadSummary(state.currentSession);
+    }
+  });
+});
+
+// ============================================================
+// RECORDING — Web Speech API
+// ============================================================
+function resetRecordingUI() {
+  state.transcript = [];
+  state.elapsedMs = 0;
+  state.isRecording = false;
+  state.isPaused = false;
+  el.recTime.textContent = "00:00";
+  el.recStatus.innerHTML = '<span class="rec-dot"></span> Listo para grabar';
+  el.liveTranscript.innerHTML = '<p class="lt-placeholder">El texto aparecerá aquí mientras hablas...</p>';
+  el.btnRecord.classList.remove("recording");
+  el.btnPause.disabled = true;
+  el.btnStop.disabled = true;
+  el.recHint.textContent = "Presiona el botón para comenzar a grabar";
+}
+
+el.btnRecord.addEventListener("click", () => {
+  if (!state.isRecording) {
+    startRecording();
+  }
+});
+
+el.btnPause.addEventListener("click", () => {
+  if (state.isPaused) resumeRecording();
+  else pauseRecording();
+});
+
+el.btnStop.addEventListener("click", async () => {
+  const ok = await showModal("¿Detener grabación?", "Se guardará la sesión y se generará el resumen.");
+  if (ok) stopRecording(true);
+});
+
+function startRecording() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    showToast("⚠️ Tu navegador no soporta reconocimiento de voz. Usa Chrome.");
+    return;
+  }
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  state.recognition = new SpeechRecognition();
+  state.recognition.lang = "es-ES";
+  state.recognition.continuous = true;
+  state.recognition.interimResults = true;
+  state.recognition.maxAlternatives = 1;
+
+  state.recognition.onstart = () => {
+    state.isRecording = true;
+    state.isPaused = false;
+    state.startTime = Date.now() - state.elapsedMs;
+    el.btnRecord.classList.add("recording");
+    el.btnPause.disabled = false;
+    el.btnStop.disabled = false;
+    el.recHint.textContent = "Grabando... habla con claridad";
+    setRecStatus("active", "🔴 Grabando");
+    startTimer();
+    startVisualizer();
+  };
+
+  state.recognition.onresult = (event) => {
+    el.liveTranscript.querySelector(".lt-placeholder")?.remove();
+    let interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const result = event.results[i];
+      if (result.isFinal) {
+        const text = result[0].transcript.trim();
+        if (text) {
+          const ts = formatTime(Date.now() - state.startTime);
+          const line = { ts, speaker: detectSpeaker(text), text };
+          state.transcript.push(line);
+          appendLiveLine(line);
+        }
+      } else {
+        interim = result[0].transcript;
+      }
+    }
+    updateInterim(interim);
+  };
+
+  state.recognition.onerror = (e) => {
+    console.error("Speech error:", e.error);
+    if (e.error === "no-speech") return;
+    if (e.error === "not-allowed") {
+      showToast("❌ Permiso de micrófono denegado");
+      stopRecording(false);
+      return;
+    }
+    // Restart on other errors
+    if (state.isRecording && !state.isPaused) {
+      setTimeout(() => {
+        try { state.recognition.start(); } catch(_) {}
+      }, 500);
+    }
+  };
+
+  state.recognition.onend = () => {
+    if (state.isRecording && !state.isPaused) {
+      setTimeout(() => {
+        try { state.recognition.start(); } catch(_) {}
+      }, 300);
+    }
+  };
+
+  try {
+    state.recognition.start();
+    startAudioContext();
+  } catch (e) {
+    showToast("Error iniciando grabación");
+  }
+}
+
+function pauseRecording() {
+  state.isPaused = true;
+  state.elapsedMs = Date.now() - state.startTime;
+  clearInterval(state.timerInterval);
+  try { state.recognition.stop(); } catch(_) {}
+  el.btnPause.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+  setRecStatus("paused", "⏸ Pausado");
+  stopVisualizer();
+}
+
+function resumeRecording() {
+  state.isPaused = false;
+  state.startTime = Date.now() - state.elapsedMs;
+  el.btnPause.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
+  setRecStatus("active", "🔴 Grabando");
+  startTimer();
+  startVisualizer();
+  try { state.recognition.start(); } catch(_) {}
+}
+
+async function stopRecording(save) {
+  state.isRecording = false;
+  state.isPaused = false;
+  clearInterval(state.timerInterval);
+  try { state.recognition.stop(); } catch(_) {}
+  stopVisualizer();
+  setRecStatus("", "Grabación detenida");
+  el.btnRecord.classList.remove("recording");
+  el.btnPause.disabled = true;
+  el.btnStop.disabled = true;
+
+  if (save && state.transcript.length > 0) {
+    const title = el.sessionTitleInput.value.trim() || `Sesión ${new Date().toLocaleDateString("es-ES")}`;
+    await saveSession(title);
+    renderHistory();
+    navigateTo("viewHistory", "Historial", true);
+    showToast("✅ Sesión guardada correctamente");
+  } else if (save && state.transcript.length === 0) {
+    showToast("⚠️ No hay transcripción para guardar");
+  }
+}
+
+// ============================================================
+// SPEAKER DETECTION (heuristic)
+// ============================================================
+const speakerPool = ["Hablante 1", "Hablante 2", "Hablante 3", "Hablante 4"];
+let lastSpeaker = null;
+let speakerChangeCount = 0;
+
+function detectSpeaker(text) {
+  // Simple heuristic: change speaker every few sentences or on certain cues
+  const questionCue = text.endsWith("?");
+  const longPause = speakerChangeCount > 3;
+  
+  if (!lastSpeaker) {
+    if (state.currentMode === "class") lastSpeaker = "Profesor";
+    else lastSpeaker = speakerPool[0];
+  }
+  
+  speakerChangeCount++;
+  
+  if ((questionCue || longPause) && Math.random() > 0.6) {
+    speakerChangeCount = 0;
+    if (state.currentMode === "class") {
+      lastSpeaker = lastSpeaker === "Profesor" ? "Estudiante" : "Profesor";
+    } else {
+      const idx = speakerPool.indexOf(lastSpeaker);
+      lastSpeaker = speakerPool[(idx + 1) % 2];
+    }
+  }
+  return lastSpeaker;
+}
+
+// ============================================================
+// LIVE TRANSCRIPT UI
+// ============================================================
+function appendLiveLine(line) {
+  const div = document.createElement("div");
+  div.className = "lt-line";
+  div.innerHTML = `<span class="lt-ts">[${line.ts}]</span><span class="lt-speaker">${line.speaker}:</span>${escapeHtml(line.text)}`;
+  el.liveTranscript.appendChild(div);
+  el.liveTranscript.scrollTop = el.liveTranscript.scrollHeight;
+}
+
+let interimEl = null;
+function updateInterim(text) {
+  if (!interimEl) {
+    interimEl = document.createElement("div");
+    interimEl.className = "lt-line lt-interim";
+    el.liveTranscript.appendChild(interimEl);
+  }
+  interimEl.textContent = text;
+  if (!text && interimEl.parentNode) {
+    interimEl.remove();
+    interimEl = null;
+  }
+  el.liveTranscript.scrollTop = el.liveTranscript.scrollHeight;
+}
+
+function setRecStatus(type, text) {
+  const dot = el.recStatus.querySelector(".rec-dot") || document.createElement("span");
+  dot.className = `rec-dot${type ? " " + type : ""}`;
+  el.recStatus.innerHTML = "";
+  el.recStatus.appendChild(dot);
+  el.recStatus.append(" " + text);
+}
+
+// ============================================================
+// TIMER
+// ============================================================
+function startTimer() {
+  clearInterval(state.timerInterval);
+  state.timerInterval = setInterval(() => {
+    const elapsed = Date.now() - state.startTime;
+    el.recTime.textContent = formatTime(elapsed);
+  }, 500);
+}
+
+// ============================================================
+// AUDIO VISUALIZER
+// ============================================================
+function startAudioContext() {
+  if (state.audioCtx) return;
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    state.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    state.analyser = state.audioCtx.createAnalyser();
+    state.analyser.fftSize = 256;
+    const src = state.audioCtx.createMediaStreamSource(stream);
+    src.connect(state.analyser);
+    drawVisualizer();
+  }).catch(() => {});
+}
+
+function drawVisualizer() {
+  const canvas = el.audioCanvas;
+  const ctx = canvas.getContext("2d");
+  const W = canvas.offsetWidth, H = canvas.offsetHeight;
+  canvas.width = W; canvas.height = H;
+
+  const bufLen = state.analyser ? state.analyser.frequencyBinCount : 128;
+  const dataArr = new Uint8Array(bufLen);
+
+  function draw() {
+    state.animFrame = requestAnimationFrame(draw);
+    if (!state.analyser) return;
+    state.analyser.getByteFrequencyData(dataArr);
+
+    ctx.clearRect(0, 0, W, H);
+    const barW = (W / bufLen) * 2;
+    let x = 0;
+    for (let i = 0; i < bufLen; i++) {
+      const barH = (dataArr[i] / 255) * H * 0.8;
+      const alpha = 0.3 + (dataArr[i] / 255) * 0.7;
+      ctx.fillStyle = `rgba(124,111,247,${alpha})`;
+      ctx.fillRect(x, H - barH, barW - 1, barH);
+      x += barW;
+    }
+  }
+  draw();
+}
+
+function startVisualizer() {
+  if (!state.analyser) startAudioContext();
+  else drawVisualizer();
+}
+
+function stopVisualizer() {
+  cancelAnimationFrame(state.animFrame);
+  const ctx = el.audioCanvas.getContext("2d");
+  ctx.clearRect(0, 0, el.audioCanvas.width, el.audioCanvas.height);
+}
+
+// ============================================================
+// SAVE SESSION
+// ============================================================
+async function saveSession(title) {
+  const duration = Date.now() - state.startTime;
+  const session = {
+    title,
+    mode: state.currentMode,
+    date: new Date().toISOString(),
+    duration,
+    transcript: state.transcript,
+    words: wordCount(state.transcript),
+    summary: null,
+    createdAt: Date.now()
+  };
+
+  try {
+    if (db && firebaseConfig.projectId !== "TU_PROJECT_ID") {
+      const docRef = await addDoc(collection(db, "sessions"), session);
+      session.id = docRef.id;
+    } else {
+      session.id = `local_${Date.now()}`;
+    }
+  } catch (e) {
+    session.id = `local_${Date.now()}`;
+  }
+
+  // Always save to localStorage as fallback/cache
+  const all = getLocalSessions();
+  all.unshift(session);
+  localStorage.setItem("voxnote_sessions", JSON.stringify(all));
+  state.sessions = all;
+  updateHomeStats();
+}
+
+function getLocalSessions() {
+  try { return JSON.parse(localStorage.getItem("voxnote_sessions") || "[]"); } catch { return []; }
+}
+
+// ============================================================
+// LOAD SESSIONS
+// ============================================================
+async function loadSessions() {
+  let sessions = getLocalSessions();
+
+  if (db && firebaseConfig.projectId !== "TU_PROJECT_ID") {
+    try {
+      const q = query(collection(db, "sessions"), orderBy("createdAt", "desc"));
+      const snap = await getDocs(q);
+      sessions = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      localStorage.setItem("voxnote_sessions", JSON.stringify(sessions));
+    } catch (e) {
+      console.warn("Firebase load failed, using localStorage");
+    }
+  }
+  state.sessions = sessions;
+  updateHomeStats();
+  return sessions;
+}
+
+function updateHomeStats() {
+  const s = state.sessions;
+  el.statSessions.textContent = s.length;
+  const totalMs = s.reduce((a, b) => a + (b.duration || 0), 0);
+  el.statMinutes.textContent = Math.round(totalMs / 60000);
+  el.statWords.textContent = s.reduce((a, b) => a + (b.words || 0), 0);
+}
+
+// ============================================================
+// HISTORY VIEW
+// ============================================================
+async function renderHistory(filter = "") {
+  const sessions = state.sessions.length ? state.sessions : await loadSessions();
+  const filtered = filter
+    ? sessions.filter(s => s.title.toLowerCase().includes(filter.toLowerCase()) ||
+        s.transcript?.some(l => l.text.toLowerCase().includes(filter.toLowerCase())))
+    : sessions;
+
+  el.histCount.textContent = `${filtered.length} sesión${filtered.length !== 1 ? "es" : ""}`;
+
+  // Clear list (keep emptyHistory)
+  Array.from(el.sessionList.children).forEach(c => {
+    if (c.id !== "emptyHistory") c.remove();
+  });
+
+  if (filtered.length === 0) {
+    el.emptyHistory.style.display = "flex";
+    return;
+  }
+  el.emptyHistory.style.display = "none";
+
+  filtered.forEach(s => {
+    const card = document.createElement("div");
+    card.className = "session-card";
+    const excerpt = s.transcript?.[0]?.text || "Sin transcripción";
+    const typeClass = s.mode === "meeting" ? "type-meeting" : "type-class";
+    const typeLabel = s.mode === "meeting" ? "Reunión" : "Clase";
+    card.innerHTML = `
+      <div class="session-card-header">
+        <div class="session-card-title">${escapeHtml(s.title)}</div>
+        <span class="session-card-type ${typeClass}">${typeLabel}</span>
+      </div>
+      <div class="session-card-excerpt">${escapeHtml(excerpt)}</div>
+      <div class="session-card-footer">
+        <span class="session-card-meta">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          ${formatDate(s.date)}
+        </span>
+        <span class="session-card-meta">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          ${formatTime(s.duration || 0)}
+        </span>
+        <span class="session-card-meta">${s.words || 0} palabras</span>
+      </div>
+    `;
+    card.addEventListener("click", () => openSession(s));
+    el.sessionList.appendChild(card);
+  });
+}
+
+el.searchInput.addEventListener("input", e => renderHistory(e.target.value));
+
+// ============================================================
+// SESSION DETAIL
+// ============================================================
+function openSession(session) {
+  state.currentSession = session;
+  el.sdTitle.textContent = session.title;
+  el.sdDate.textContent = formatDate(session.date);
+  el.sdDuration.textContent = formatTime(session.duration || 0);
+  el.sdWords.textContent = `${session.words || 0} palabras`;
+
+  // Reset tabs
+  el.tabs.forEach(t => t.classList.remove("active"));
+  el.tabs[0].classList.add("active");
+  el.tabTranscript.classList.remove("hidden");
+  el.tabSummary.classList.add("hidden");
+  el.summaryResult.classList.add("hidden");
+  el.summaryLoading.style.display = "none";
+
+  // Render transcript
+  el.transcriptFull.innerHTML = "";
+  if (!session.transcript || session.transcript.length === 0) {
+    el.transcriptFull.innerHTML = "<p style='color:var(--text3);font-style:italic'>Sin transcripción disponible.</p>";
+  } else {
+    session.transcript.forEach(line => {
+      const div = document.createElement("div");
+      div.className = "tf-line";
+      div.innerHTML = `<span class="tf-ts">[${line.ts}]</span><span class="tf-speaker">${escapeHtml(line.speaker)}:</span> ${escapeHtml(line.text)}`;
+      el.transcriptFull.appendChild(div);
+    });
+  }
+
+  navigateTo("viewSession", session.title.substring(0, 20), true);
+}
+
+// ============================================================
+// AI SUMMARY — Claude API
+// ============================================================
+async function loadSummary(session) {
+  if (session.summary) {
+    renderSummary(session.summary);
+    return;
+  }
+  if (!session.transcript || session.transcript.length === 0) {
+    el.summaryLoading.style.display = "none";
+    el.summaryResult.classList.remove("hidden");
+    el.summaryResult.innerHTML = '<div class="sum-section"><p>No hay transcripción para resumir.</p></div>';
+    return;
+  }
+
+  el.summaryLoading.style.display = "flex";
+  el.summaryResult.classList.add("hidden");
+
+  const transcriptText = session.transcript
+    .map(l => `[${l.ts}] ${l.speaker}: ${l.text}`)
+    .join("\n");
+
+  const prompt = `Eres un asistente académico experto. Analiza la siguiente transcripción y genera un resumen estructurado EN ESPAÑOL.
+
+TRANSCRIPCIÓN:
+${transcriptText}
+
+Responde SOLO con un objeto JSON con esta estructura exacta (sin markdown, sin backticks):
+{
+  "tema": "Tema principal en 1 oración",
+  "resumen": "Resumen corto en 2-3 oraciones",
+  "conceptos": ["concepto 1", "concepto 2", "concepto 3"],
+  "puntos_clave": ["punto 1", "punto 2", "punto 3"],
+  "preguntas": ["pregunta relevante 1", "pregunta relevante 2"],
+  "tareas": ["tarea o conclusión 1", "tarea o conclusión 2"]
+}`;
+
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+
+    const data = await response.json();
+    const rawText = data.content?.find(b => b.type === "text")?.text || "{}";
+    const clean = rawText.replace(/```json|```/g, "").trim();
+    const summary = JSON.parse(clean);
+
+    // Cache in session
+    session.summary = summary;
+    const all = getLocalSessions();
+    const idx = all.findIndex(s => s.id === session.id);
+    if (idx !== -1) { all[idx].summary = summary; localStorage.setItem("voxnote_sessions", JSON.stringify(all)); }
+
+    el.summaryLoading.style.display = "none";
+    renderSummary(summary);
+
+  } catch (e) {
+    console.error("Summary error:", e);
+    el.summaryLoading.style.display = "none";
+    // Fallback local summary
+    const fallback = generateLocalSummary(session.transcript);
+    renderSummary(fallback);
+  }
+}
+
+function generateLocalSummary(transcript) {
+  const allText = transcript.map(l => l.text).join(" ");
+  const words = allText.split(/\s+/).filter(Boolean);
+  const speakers = [...new Set(transcript.map(l => l.speaker))];
+  return {
+    tema: "Sesión grabada — resumen automático",
+    resumen: `Sesión con ${transcript.length} intervenciones de ${speakers.join(", ")}. Total: ${words.length} palabras.`,
+    conceptos: speakers,
+    puntos_clave: transcript.slice(0, 3).map(l => l.text.substring(0, 80)),
+    preguntas: transcript.filter(l => l.text.includes("?")).slice(0, 2).map(l => l.text),
+    tareas: ["Revisar la transcripción completa"]
+  };
+}
+
+function renderSummary(s) {
+  el.summaryResult.classList.remove("hidden");
+  el.summaryResult.innerHTML = `
+    <div class="sum-section">
+      <h4>📌 Tema Principal</h4>
+      <p>${escapeHtml(s.tema || "—")}</p>
+    </div>
+    <div class="sum-section">
+      <h4>📋 Resumen</h4>
+      <p>${escapeHtml(s.resumen || "—")}</p>
+    </div>
+    <div class="sum-section">
+      <h4>💡 Conceptos Clave</h4>
+      <div>${(s.conceptos || []).map(c => `<span class="sum-tag">${escapeHtml(c)}</span>`).join("")}</div>
+    </div>
+    <div class="sum-section">
+      <h4>✅ Puntos Clave</h4>
+      <ul>${(s.puntos_clave || []).map(p => `<li>${escapeHtml(p)}</li>`).join("")}</ul>
+    </div>
+    ${(s.preguntas || []).length ? `
+    <div class="sum-section">
+      <h4>❓ Preguntas Relevantes</h4>
+      <ul>${s.preguntas.map(p => `<li>${escapeHtml(p)}</li>`).join("")}</ul>
+    </div>` : ""}
+    ${(s.tareas || []).length ? `
+    <div class="sum-section">
+      <h4>📝 Tareas / Conclusiones</h4>
+      <ul>${s.tareas.map(t => `<li>${escapeHtml(t)}</li>`).join("")}</ul>
+    </div>` : ""}
+  `;
+}
+
+// ============================================================
+// EXPORT / SHARE ACTIONS
+// ============================================================
+el.btnCopy.addEventListener("click", () => {
+  const session = state.currentSession;
+  if (!session) return;
+  const text = buildTranscriptText(session);
+  navigator.clipboard.writeText(text).then(() => showToast("✅ Copiado al portapapeles"));
+});
+
+el.btnExportTxt.addEventListener("click", () => {
+  const session = state.currentSession;
+  if (!session) return;
+  const text = buildTranscriptText(session);
+  downloadFile(`${session.title}.txt`, text, "text/plain");
+  showToast("📄 TXT descargado");
+});
+
+el.btnExportPDF.addEventListener("click", () => {
+  const session = state.currentSession;
+  if (!session) return;
+  exportPDF(session);
+});
+
+el.btnShare.addEventListener("click", () => {
+  const session = state.currentSession;
+  if (!session) return;
+  const text = buildTranscriptText(session);
+  if (navigator.share) {
+    navigator.share({ title: session.title, text: text.substring(0, 2000) })
+      .catch(() => {});
+  } else {
+    navigator.clipboard.writeText(text).then(() => showToast("✅ Texto copiado para compartir"));
+  }
+});
+
+el.btnDeleteSession.addEventListener("click", async () => {
+  const session = state.currentSession;
+  if (!session) return;
+  const ok = await showModal("¿Eliminar sesión?", `Se eliminará "${session.title}" permanentemente.`);
+  if (!ok) return;
+
+  try {
+    if (db && session.id && !session.id.startsWith("local_") && firebaseConfig.projectId !== "TU_PROJECT_ID") {
+      await deleteDoc(doc(db, "sessions", session.id));
+    }
+  } catch (e) {}
+
+  const all = getLocalSessions().filter(s => s.id !== session.id);
+  localStorage.setItem("voxnote_sessions", JSON.stringify(all));
+  state.sessions = all;
+  updateHomeStats();
+  showToast("🗑️ Sesión eliminada");
+  renderHistory();
+  navigateTo("viewHistory", "Historial", true);
+});
+
+function buildTranscriptText(session) {
+  const header = `VoxNote — ${session.title}\nFecha: ${formatDate(session.date)}\nDuración: ${formatTime(session.duration || 0)}\nPalabras: ${session.words || 0}\n${"─".repeat(40)}\n\nTRANSCRIPCIÓN:\n\n`;
+  const body = (session.transcript || []).map(l => `[${l.ts}] ${l.speaker}: ${l.text}`).join("\n");
+  let summary = "";
+  if (session.summary) {
+    const s = session.summary;
+    summary = `\n\n${"─".repeat(40)}\nRESUMEN IA:\n\nTema: ${s.tema}\n\n${s.resumen}\n\nConceptos clave: ${(s.conceptos||[]).join(", ")}\n\nPuntos clave:\n${(s.puntos_clave||[]).map(p=>"• "+p).join("\n")}\n\nTareas:\n${(s.tareas||[]).map(t=>"• "+t).join("\n")}`;
+  }
+  return header + body + summary;
+}
+
+function downloadFile(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportPDF(session) {
+  const content = buildTranscriptText(session);
+  const win = window.open("", "_blank");
+  win.document.write(`<!DOCTYPE html><html><head>
+    <meta charset="UTF-8">
+    <title>${escapeHtml(session.title)}</title>
+    <style>
+      body { font-family: Arial, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; color: #111; line-height: 1.6; font-size: 13px; }
+      h1 { font-size: 1.4rem; border-bottom: 2px solid #7c6ff7; padding-bottom: 8px; color: #333; }
+      .meta { color: #666; font-size: 0.85rem; margin-bottom: 20px; }
+      .line { margin-bottom: 8px; }
+      .ts { color: #7c6ff7; font-size: 0.78rem; font-weight: bold; margin-right: 6px; }
+      .speaker { color: #444; font-weight: bold; margin-right: 4px; }
+      h2 { font-size: 1rem; color: #7c6ff7; margin-top: 28px; border-bottom: 1px solid #eee; padding-bottom: 4px; }
+      .tag { display: inline-block; background: #ede9fe; color: #7c6ff7; padding: 2px 8px; border-radius: 12px; margin: 2px; font-size: 0.78rem; }
+      @media print { button { display: none; } }
+    </style>
+  </head><body>
+    <button onclick="window.print()" style="background:#7c6ff7;color:#fff;border:none;padding:8px 18px;border-radius:8px;cursor:pointer;margin-bottom:16px;font-size:0.9rem">🖨️ Imprimir / Guardar PDF</button>
+    <h1>${escapeHtml(session.title)}</h1>
+    <div class="meta">📅 ${formatDate(session.date)} &nbsp;·&nbsp; ⏱ ${formatTime(session.duration || 0)} &nbsp;·&nbsp; 📝 ${session.words || 0} palabras</div>
+    <h2>TRANSCRIPCIÓN</h2>
+    ${(session.transcript || []).map(l => `<div class="line"><span class="ts">[${l.ts}]</span><span class="speaker">${escapeHtml(l.speaker)}:</span>${escapeHtml(l.text)}</div>`).join("")}
+    ${session.summary ? `
+    <h2>RESUMEN IA</h2>
+    <p><strong>Tema:</strong> ${escapeHtml(session.summary.tema)}</p>
+    <p>${escapeHtml(session.summary.resumen)}</p>
+    <p><strong>Conceptos clave:</strong> ${(session.summary.conceptos||[]).map(c=>`<span class="tag">${escapeHtml(c)}</span>`).join("")}</p>
+    <p><strong>Puntos clave:</strong></p><ul>${(session.summary.puntos_clave||[]).map(p=>`<li>${escapeHtml(p)}</li>`).join("")}</ul>
+    <p><strong>Tareas:</strong></p><ul>${(session.summary.tareas||[]).map(t=>`<li>${escapeHtml(t)}</li>`).join("")}</ul>
+    ` : ""}
+  </body></html>`);
+  win.document.close();
+}
+
+// ============================================================
+// SECURITY
+// ============================================================
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+// ============================================================
+// INIT
+// ============================================================
+async function init() {
+  await loadSessions();
+  setTimeout(() => {
+    el.splash.classList.add("fade-out");
+    setTimeout(() => {
+      el.splash.style.display = "none";
+      el.app.classList.remove("hidden");
+      navigateTo("viewHome", "VoxNote");
+    }, 500);
+  }, 1500);
+}
+
+init();
