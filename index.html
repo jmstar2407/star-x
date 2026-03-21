@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0f0f13" />
+  <meta name="description" content="VoxScribe — Transcripción en tiempo real con identificación de hablantes" />
+  <title>VoxScribe</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:ital,wght@0,400;0,500;1,400&family=Instrument+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet" />
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="css/main.css" />
+</head>
+<body data-theme="dark">
+
+  <!-- ── SIDEBAR ── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <span class="logo-icon">◈</span>
+        <span class="logo-text">VoxScribe</span>
+      </div>
+      <button class="btn-icon sidebar-toggle-close" id="sidebarClose" aria-label="Cerrar panel">✕</button>
+    </div>
+
+    <div class="sidebar-section">
+      <p class="sidebar-label">Nueva sesión</p>
+      <button class="btn-primary w-full" id="btnNewSession">
+        <span>+ Nueva reunión</span>
+      </button>
+    </div>
+
+    <div class="sidebar-section">
+      <p class="sidebar-label">Sesiones guardadas</p>
+      <ul class="session-list" id="sessionList">
+        <li class="session-empty">Sin sesiones aún</li>
+      </ul>
+    </div>
+
+    <div class="sidebar-footer">
+      <button class="btn-icon-label" id="btnTheme">
+        <span class="theme-icon">◐</span>
+        <span id="themeLabel">Modo claro</span>
+      </button>
+      <button class="btn-icon-label" id="btnSettings">
+        <span>⚙</span>
+        <span>Configuración</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ── OVERLAY ── -->
+  <div class="overlay" id="overlay"></div>
+
+  <!-- ── MAIN ── -->
+  <main class="main">
+
+    <!-- Top Bar -->
+    <header class="topbar">
+      <button class="btn-icon" id="sidebarOpen" aria-label="Abrir panel">☰</button>
+
+      <div class="session-info">
+        <h1 class="session-title" id="sessionTitle">Nueva sesión</h1>
+        <span class="session-meta" id="sessionMeta">Sin iniciar</span>
+      </div>
+
+      <div class="topbar-actions">
+        <button class="btn-icon" id="btnSearch" title="Buscar">⌕</button>
+        <button class="btn-icon" id="btnExport" title="Exportar">↓</button>
+        <button class="btn-icon" id="btnCopy" title="Copiar todo">⎘</button>
+      </div>
+    </header>
+
+    <!-- Search Bar -->
+    <div class="search-bar hidden" id="searchBar">
+      <input type="text" id="searchInput" placeholder="Buscar en la transcripción…" autocomplete="off" />
+      <button class="btn-icon" id="searchClose">✕</button>
+    </div>
+
+    <!-- Transcript Area -->
+    <section class="transcript-area" id="transcriptArea">
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon">◈</div>
+        <p class="empty-title">Listo para transcribir</p>
+        <p class="empty-sub">Presiona el botón rojo para comenzar a capturar audio en tiempo real.</p>
+      </div>
+      <ul class="transcript-list" id="transcriptList"></ul>
+    </section>
+
+    <!-- Live Caption Bar -->
+    <div class="live-bar" id="liveBar">
+      <span class="live-dot"></span>
+      <span class="live-text" id="liveText">Escuchando…</span>
+    </div>
+
+    <!-- Controls -->
+    <footer class="controls">
+      <div class="controls-inner">
+        <!-- Speaker selector -->
+        <div class="speaker-chip" id="activeSpeakerWrap">
+          <span class="speaker-dot" id="activeSpeakerDot"></span>
+          <span id="activeSpeakerName">Hablante 1</span>
+          <span class="chevron">▾</span>
+        </div>
+
+        <!-- Record button -->
+        <button class="btn-record" id="btnRecord" aria-label="Iniciar grabación">
+          <span class="record-ring"></span>
+          <span class="record-core"></span>
+        </button>
+
+        <!-- Duration -->
+        <div class="duration-display">
+          <span id="durationDisplay">00:00</span>
+        </div>
+      </div>
+
+      <!-- Waveform -->
+      <canvas class="waveform" id="waveform" width="400" height="48"></canvas>
+    </footer>
+
+  </main>
+
+  <!-- ── MODALS ── -->
+
+  <!-- New Session Modal -->
+  <div class="modal-backdrop hidden" id="modalNewSession">
+    <div class="modal">
+      <h2 class="modal-title">Nueva sesión</h2>
+      <label class="field-label">Nombre de la sesión</label>
+      <input class="field-input" id="newSessionName" type="text" placeholder="Ej: Reunión de equipo — lunes" />
+      <label class="field-label">Tipo</label>
+      <div class="type-grid">
+        <button class="type-btn active" data-type="meeting">📹 Reunión virtual</button>
+        <button class="type-btn" data-type="class">🎓 Clase presencial</button>
+        <button class="type-btn" data-type="interview">🎙 Entrevista</button>
+        <button class="type-btn" data-type="other">📝 Otro</button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="modalCancelNew">Cancelar</button>
+        <button class="btn-primary" id="modalConfirmNew">Crear sesión</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Speakers Modal -->
+  <div class="modal-backdrop hidden" id="modalSpeakers">
+    <div class="modal">
+      <h2 class="modal-title">Hablantes detectados</h2>
+      <p class="modal-sub">Renombra los hablantes para una transcripción más clara.</p>
+      <ul class="speakers-list" id="speakersList"></ul>
+      <button class="btn-dashed w-full" id="btnAddSpeaker">+ Agregar hablante</button>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="modalCancelSpeakers">Cancelar</button>
+        <button class="btn-primary" id="modalSaveSpeakers">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal-backdrop hidden" id="modalSettings">
+    <div class="modal">
+      <h2 class="modal-title">Configuración</h2>
+
+      <label class="field-label">Firebase — API Key</label>
+      <input class="field-input" id="cfgFirebaseKey" type="text" placeholder="AIzaSy…" />
+
+      <label class="field-label">Firebase — Project ID</label>
+      <input class="field-input" id="cfgFirebaseProject" type="text" placeholder="mi-proyecto-12345" />
+
+      <label class="field-label">Idioma de reconocimiento</label>
+      <select class="field-input" id="cfgLanguage">
+        <option value="es-ES">Español (España)</option>
+        <option value="es-MX">Español (México)</option>
+        <option value="es-DO" selected>Español (República Dominicana)</option>
+        <option value="es-419">Español (Latinoamérica)</option>
+        <option value="en-US">English (US)</option>
+      </select>
+
+      <label class="field-label">Auto-scroll</label>
+      <div class="toggle-row">
+        <span>Desplazarse automáticamente</span>
+        <label class="toggle">
+          <input type="checkbox" id="cfgAutoScroll" checked />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn-ghost" id="modalCancelSettings">Cancelar</button>
+        <button class="btn-primary" id="modalSaveSettings">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Export Modal -->
+  <div class="modal-backdrop hidden" id="modalExport">
+    <div class="modal">
+      <h2 class="modal-title">Exportar transcripción</h2>
+      <div class="export-grid">
+        <button class="export-btn" id="exportTxt">
+          <span class="export-icon">📄</span>
+          <span>Texto .txt</span>
+        </button>
+        <button class="export-btn" id="exportPdf">
+          <span class="export-icon">📑</span>
+          <span>PDF</span>
+        </button>
+        <button class="export-btn" id="exportJson">
+          <span class="export-icon">{ }</span>
+          <span>JSON</span>
+        </button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="modalCancelExport">Cerrar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Speaker picker dropdown -->
+  <div class="speaker-dropdown hidden" id="speakerDropdown"></div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <!-- Scripts -->
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
